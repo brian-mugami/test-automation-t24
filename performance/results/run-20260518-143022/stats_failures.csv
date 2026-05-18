@@ -1,0 +1,2 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+POST,POST login form,HTTPError('405 Client Error: Method Not Allowed for url: POST login form'),5,2026-05-18T11:30:24Z,2026-05-18T11:30:28Z

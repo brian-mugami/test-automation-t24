@@ -12,6 +12,7 @@ import sys
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -26,6 +27,8 @@ REPORTS_DIR = "reports"
 HISTORY_DIR = "reports/history"
 SCREENSHOTS_DIR = "reports/screenshots"
 LOGO_PATH = "dashboard/assets/bank_of_kigali_logo.png"
+PERF_RESULTS_DIR = "performance/results"
+PERF_LOCUSTFILE = "performance/locustfile.py"
 
 st.set_page_config(
     page_title="Bank of Kigali - T24 Test Automation",
@@ -182,6 +185,166 @@ def run_pytest_streaming(args_list, label, status_ph, log_ph):
     except Exception as e:
         status_ph.error(f"Error running tests: {e}")
         return -1
+
+
+def default_perf_target():
+    raw = os.getenv("BW_URL", "")
+    if not raw:
+        return "http://localhost", "/"
+    parsed = urlparse(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return raw.rstrip("/"), "/"
+    host = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    return host, path
+
+
+def locust_command_base():
+    venv_locust = Path("tester/Scripts/locust.exe")
+    if venv_locust.exists():
+        return [str(venv_locust)]
+    return [sys.executable, "-m", "locust"]
+
+
+def run_locust_headless(config, status_ph, log_ph):
+    """Run Locust headless and return the results directory path."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    result_dir = Path(PERF_RESULTS_DIR) / f"run-{timestamp}"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    csv_prefix = result_dir / "stats"
+    html_report = result_dir / "report.html"
+    stdout_log = result_dir / "stdout.log"
+
+    cmd = locust_command_base() + [
+        "-f", PERF_LOCUSTFILE,
+        "--headless",
+        "-u", str(config["users"]),
+        "-r", str(config["spawn_rate"]),
+        "-t", config["duration"],
+        "--host", config["host"],
+        "--csv", str(csv_prefix),
+        "--html", str(html_report),
+    ]
+
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["PERF_PATHS"] = "\n".join(config["paths"])
+    env["PERF_MIN_WAIT"] = str(config["min_wait"])
+    env["PERF_MAX_WAIT"] = str(config["max_wait"])
+    env["PERF_LOGIN_ENABLED"] = "1" if config["login_enabled"] else "0"
+    env["PERF_LOGIN_USER"] = config.get("login_user", "")
+    env["PERF_LOGIN_PASS"] = config.get("login_pass", "")
+    env["PERF_LOGIN_PATH"] = config.get(
+        "login_path", "/BrowserWeb/servlet/BrowserLoginServlet")
+
+    status_ph.info(
+        f"Running performance test: {config['users']} users, "
+        f"{config['spawn_rate']}/s spawn, duration {config['duration']}"
+    )
+
+    lines = []
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        with open(stdout_log, "w", encoding="utf-8") as f:
+            for line in iter(process.stdout.readline, ""):
+                if not line:
+                    break
+                line = line.rstrip()
+                lines.append(line)
+                f.write(line + "\n")
+                log_ph.code("\n".join(lines[-40:]), language="text")
+        process.wait()
+        if process.returncode == 0:
+            status_ph.success(f"Performance run complete: {result_dir}")
+        else:
+            status_ph.error(
+                f"Performance run ended with exit code {process.returncode}. "
+                f"See {stdout_log}."
+            )
+        return str(result_dir)
+    except Exception as e:
+        status_ph.error(f"Could not run Locust: {e}")
+        return str(result_dir)
+
+
+def latest_perf_runs():
+    root = Path(PERF_RESULTS_DIR)
+    if not root.exists():
+        return []
+    return sorted(
+        [p for p in root.iterdir() if p.is_dir()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def load_perf_stats(result_dir):
+    stats_path = Path(result_dir) / "stats_stats.csv"
+    if not stats_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(stats_path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def load_perf_failures(result_dir):
+    failures_path = Path(result_dir) / "stats_failures.csv"
+    if not failures_path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(failures_path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def perf_total_row(stats_df):
+    if stats_df.empty:
+        return {}
+
+    name_col = "Name" if "Name" in stats_df.columns else None
+    type_col = "Type" if "Type" in stats_df.columns else None
+    candidates = pd.DataFrame()
+    if name_col:
+        candidates = stats_df[
+            stats_df[name_col].astype(str).str.lower().isin(
+                ["aggregated", "total"]
+            )
+        ]
+    if candidates.empty and type_col:
+        candidates = stats_df[
+            stats_df[type_col].astype(str).str.lower().isin(
+                ["aggregated", "total"]
+            )
+        ]
+    if candidates.empty:
+        candidates = stats_df.tail(1)
+    return candidates.iloc[-1].to_dict()
+
+
+def perf_value(row, *names, default=0):
+    for name in names:
+        if name in row and pd.notna(row[name]):
+            return row[name]
+    return default
+
+
+def format_perf_number(value, decimals=1):
+    try:
+        return f"{float(value):,.{decimals}f}"
+    except (TypeError, ValueError):
+        return "0"
 
 
 def discover_test_files():
@@ -1615,6 +1778,168 @@ with tab_runner:
             ["tests/regression/", "-k", "future_date_of_birth"],
             "Future DOB Compliance",
         )
+
+    # ----- Performance / load testing -----
+    st.markdown("##### Performance & Load Testing")
+    st.caption(
+        "Runs a separate Locust HTTP load probe against the selected T24 host. "
+        "The default scenario is read-only and does not touch the Selenium "
+        "functional automation."
+    )
+
+    default_host, default_path = default_perf_target()
+    with st.expander("Configure Locust run", expanded=False):
+        pc1, pc2 = st.columns([2, 1])
+        with pc1:
+            perf_host = st.text_input(
+                "T24 host",
+                value=default_host,
+                help="Base URL only, for example http://host:port",
+            )
+            perf_paths_text = st.text_area(
+                "Paths to probe",
+                value=default_path,
+                height=96,
+                help="One path per line. Full URLs are accepted; only their path/query is used.",
+            )
+        with pc2:
+            perf_users = st.number_input(
+                "Virtual users", min_value=1, max_value=500, value=5, step=1
+            )
+            perf_spawn_rate = st.number_input(
+                "Spawn rate / second",
+                min_value=0.1,
+                max_value=100.0,
+                value=1.0,
+                step=0.5,
+            )
+            perf_duration = st.text_input(
+                "Duration", value="1m", help="Examples: 30s, 1m, 5m"
+            )
+
+        wc1, wc2, wc3 = st.columns(3)
+        with wc1:
+            perf_min_wait = st.number_input(
+                "Min wait (sec)", min_value=0.0, max_value=60.0, value=1.0, step=0.5
+            )
+        with wc2:
+            perf_max_wait = st.number_input(
+                "Max wait (sec)", min_value=0.0, max_value=60.0, value=3.0, step=0.5
+            )
+        with wc3:
+            perf_login_enabled = st.checkbox(
+                "Submit login first",
+                value=False,
+                help="Use only in an approved performance environment.",
+            )
+
+        login_user = ""
+        login_pass = ""
+        login_path = "/BrowserWeb/servlet/BrowserLoginServlet"
+        if perf_login_enabled:
+            lc1, lc2, lc3 = st.columns([1, 1, 2])
+            with lc1:
+                login_user = st.text_input("Login user", value=os.getenv("PERF_LOGIN_USER", ""))
+            with lc2:
+                login_pass = st.text_input(
+                    "Login password",
+                    value=os.getenv("PERF_LOGIN_PASS", ""),
+                    type="password",
+                )
+            with lc3:
+                login_path = st.text_input(
+                    "Login path",
+                    value=os.getenv(
+                        "PERF_LOGIN_PATH",
+                        "/BrowserWeb/servlet/BrowserLoginServlet",
+                    ),
+                )
+
+        perf_status_ph = st.empty()
+        perf_log_ph = st.empty()
+        if st.button("Run Read-Only Load Test", use_container_width=True):
+            paths = [
+                line.strip()
+                for line in perf_paths_text.splitlines()
+                if line.strip()
+            ] or ["/"]
+            if perf_max_wait < perf_min_wait:
+                perf_status_ph.error("Max wait must be greater than or equal to min wait.")
+            elif not Path(PERF_LOCUSTFILE).exists():
+                perf_status_ph.error(f"Locust file not found: {PERF_LOCUSTFILE}")
+            else:
+                run_locust_headless(
+                    {
+                        "host": perf_host.rstrip("/"),
+                        "paths": paths,
+                        "users": int(perf_users),
+                        "spawn_rate": float(perf_spawn_rate),
+                        "duration": perf_duration.strip() or "1m",
+                        "min_wait": float(perf_min_wait),
+                        "max_wait": float(perf_max_wait),
+                        "login_enabled": bool(perf_login_enabled),
+                        "login_user": login_user,
+                        "login_pass": login_pass,
+                        "login_path": login_path,
+                    },
+                    perf_status_ph,
+                    perf_log_ph,
+                )
+                st.cache_data.clear()
+
+    perf_runs = latest_perf_runs()
+    if perf_runs:
+        selected_perf_run = st.selectbox(
+            "Performance evidence",
+            options=perf_runs,
+            format_func=lambda p: p.name,
+        )
+        perf_stats = load_perf_stats(selected_perf_run)
+        perf_failures = load_perf_failures(selected_perf_run)
+        total = perf_total_row(perf_stats)
+
+        pr1, pr2, pr3, pr4 = st.columns(4)
+        pr1.metric(
+            "Requests",
+            format_perf_number(
+                perf_value(total, "Request Count", "Requests", default=0),
+                decimals=0,
+            ),
+        )
+        pr2.metric(
+            "Failures",
+            format_perf_number(
+                perf_value(total, "Failure Count", "Failures", default=0),
+                decimals=0,
+            ),
+        )
+        pr3.metric(
+            "P95 Response",
+            f"{format_perf_number(perf_value(total, '95%', '95', default=0), 0)} ms",
+        )
+        pr4.metric(
+            "Throughput",
+            f"{format_perf_number(perf_value(total, 'Requests/s', 'Req/s', default=0), 2)} req/s",
+        )
+
+        if not perf_stats.empty:
+            st.dataframe(perf_stats, use_container_width=True, hide_index=True)
+        if not perf_failures.empty:
+            st.warning("Locust recorded failures for this run.")
+            st.dataframe(perf_failures, use_container_width=True, hide_index=True)
+
+        html_report = Path(selected_perf_run) / "report.html"
+        if html_report.exists():
+            with open(html_report, "rb") as f:
+                st.download_button(
+                    "Download Locust HTML Report",
+                    data=f.read(),
+                    file_name=f"{selected_perf_run.name}_locust_report.html",
+                    mime="text/html",
+                    use_container_width=True,
+                )
+    else:
+        st.info("No performance runs yet. Configure Locust above and run a read-only probe when the T24 environment is ready.")
 
     # ----- Specific test file picker -----
     st.markdown("##### Pick Specific Test Files")

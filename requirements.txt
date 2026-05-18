@@ -1,4 +1,5 @@
 selenium
+selenium-wire
 pytest
 pytest-html
 pytest-json-report
@@ -9,3 +10,4 @@ pandas
 faker
 openpyxl
 reportlab
+locust

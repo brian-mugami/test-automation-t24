@@ -1,0 +1,11 @@
+selenium
+pytest
+pytest-html
+pytest-json-report
+python-dotenv
+streamlit
+plotly
+pandas
+faker
+openpyxl
+reportlab

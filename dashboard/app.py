@@ -64,6 +64,33 @@ TIER_DESCRIPTIONS = {
 PAGE_SIZE_OPTIONS = [10, 25, 50, 100]
 DEFAULT_PAGE_SIZE = 25
 
+AA_STEP_LABELS = {
+    "01_aa_product_catalog": "AA product catalogue opened",
+    "02_aa_term_deposit_products": "Term deposit products listed",
+    "03_aa_input_form": "New arrangement input form loaded",
+    "04_aa_header_filled": "Customer and currency captured",
+    "05_aa_validated_settlement_fields": "Arrangement allocated and settlement fields shown",
+    "06_aa_settlement_filled": "Settlement accounts captured",
+    "07_aa_revalidated": "Arrangement revalidated",
+    "08_aa_before_commit": "Ready to commit",
+    "09_aa_commit_clicked": "Commit submitted",
+    "10_aa_warning_answered": "Commit warning answered",
+    "11_aa_override_prompt": "Override prompt displayed",
+    "12_aa_override_accepted": "Override accepted",
+    "13_aa_committed_final": "Input complete with T24 confirmation",
+    "14_aa_inputter_signed_off": "Inputter signed off",
+    "15_aa_authoriser_signed_in": "Authoriser signed in",
+    "16_aa_auth_search_loaded": "Unauthorized AAA search loaded",
+    "17_aa_auth_results_loaded": "Unauthorized AAA results found",
+    "18_aa_auth_arrangement_selected": "Correct customer arrangement selected",
+    "19_aa_auth_approval_drillbox": "Approval choice displayed",
+    "20_aa_auth_approve_selected": "Approve drilldown selected",
+    "21_aa_auth_toolbar_loaded": "Final authorise toolbar loaded",
+    "22_aa_authorise_attempted": "AA arrangement authorised",
+    "PASS_test_aa_term_deposit_input": "AA term deposit lifecycle passed",
+    "FAIL_test_aa_term_deposit_input": "AA term deposit lifecycle failed",
+}
+
 # Minimal, intentional styling
 st.markdown(f"""
 <style>
@@ -316,10 +343,69 @@ def run_summary(run: dict) -> dict:
     }
 
 
+def tests_summary(tests_df: pd.DataFrame, timestamp=None,
+                  source: str = "selected") -> dict:
+    total = len(tests_df)
+    passed = int((tests_df["outcome"] == "passed").sum()) if total else 0
+    failed = int((tests_df["outcome"] == "failed").sum()) if total else 0
+    skipped = int((tests_df["outcome"] == "skipped").sum()) if total else 0
+    duration = float(tests_df["duration"].sum()) if total else 0
+    if timestamp is None:
+        if total and "run_timestamp" in tests_df:
+            timestamp = tests_df["run_timestamp"].max()
+        else:
+            timestamp = datetime.now()
+    return {
+        "timestamp": timestamp,
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "pass_rate": (passed / total * 100) if total else 0,
+        "duration": duration,
+        "source": source,
+    }
+
+
 def all_screenshots() -> list:
     if not os.path.exists(SCREENSHOTS_DIR):
         return []
     return sorted(glob.glob(os.path.join(SCREENSHOTS_DIR, "*.png")))
+
+
+def screenshot_caption(path: str) -> str:
+    stem = Path(path).stem
+    return AA_STEP_LABELS.get(stem, stem.replace("_", " ").title())
+
+
+def journey_screenshot_filter(test_id: str, path: str) -> bool:
+    stem = Path(path).stem
+    test_func = test_id.split("::")[-1].lower()
+
+    if "aa_term_deposit" in test_func:
+        return stem in AA_STEP_LABELS or "_aa_" in stem
+    if "funds_transfer" in test_func:
+        return "_ft_" in stem or "funds_transfer" in stem
+    if "account" in test_func:
+        return "_account_" in stem or "account_" in stem
+    if "customer" in test_func:
+        return "_customer_" in stem or "customer_" in stem
+    if "login" in test_func:
+        return "login" in stem.lower()
+    if "logout" in test_func or "sign_off" in test_func:
+        return "logout" in stem.lower() or "signed_off" in stem.lower()
+    return False
+
+
+def load_state_json(filename: str) -> dict:
+    path = Path(REPORTS_DIR) / "state" / filename
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def screenshots_for_test(test_id: str, outcome: str,
@@ -345,9 +431,9 @@ def screenshots_for_test(test_id: str, outcome: str,
     if is_latest_run:
         for s in shots:
             stem = Path(s).stem
-            if re.match(r"^\d+_", stem):
+            if re.match(r"^\d+_", stem) and journey_screenshot_filter(test_id, s):
                 journey.append(s)
-            elif stem.startswith("DEBUG_"):
+            elif stem.startswith("DEBUG_") and journey_screenshot_filter(test_id, s):
                 debug.append(s)
 
     return {
@@ -392,7 +478,11 @@ def _pdf_escape(text) -> str:
     )
 
 
-def generate_pdf_report(runs, latest_summary, latest_tests):
+def generate_pdf_report(
+        runs, latest_summary, latest_tests,
+        report_title="T24 Test Automation - Release-Readiness Report",
+        scope_label="Latest Run",
+):
     """Build a release-readiness PDF with the BoK logo, summary,
     test results table, and failure forensics. Returns bytes."""
     from reportlab.lib import colors
@@ -458,17 +548,14 @@ def generate_pdf_report(runs, latest_summary, latest_tests):
             pass
 
     elements.append(Paragraph("Bank of Kigali", title_style))
-    elements.append(Paragraph(
-        "T24 Test Automation - Release-Readiness Report",
-        subtitle_style,
-    ))
+    elements.append(Paragraph(report_title, subtitle_style))
 
     # ----- Metadata -----
     meta = [
         ["Report Generated", datetime.now().strftime("%d %B %Y, %H:%M")],
-        ["Latest Run", latest_summary["timestamp"].strftime("%d %B %Y, %H:%M")],
+        [scope_label, latest_summary["timestamp"].strftime("%d %B %Y, %H:%M")],
         ["Total Runs on Record", str(len(runs))],
-        ["Run Duration", format_duration(latest_summary["duration"])],
+        ["Evidence Duration", format_duration(latest_summary["duration"])],
     ]
     meta_tbl = Table(meta, colWidths=[5 * cm, 10 * cm])
     meta_tbl.setStyle(TableStyle([
@@ -483,7 +570,7 @@ def generate_pdf_report(runs, latest_summary, latest_tests):
     elements.append(meta_tbl)
 
     # ----- KPI summary -----
-    elements.append(Paragraph("Latest Run Summary", section_style))
+    elements.append(Paragraph(f"{scope_label} Summary", section_style))
     kpis = [
         ["Total", "Passed", "Failed", "Skipped", "Pass Rate"],
         [
@@ -709,7 +796,11 @@ latest = runs[0]
 latest_summary = run_summary(latest)
 latest_tests = extract_tests(latest)
 all_tests = extract_all_tests(runs)
+if not all_tests.empty:
+    all_tests["run_timestamp"] = pd.to_datetime(all_tests["run_timestamp"])
 hist_summaries = pd.DataFrame([run_summary(r) for r in runs]).iloc[::-1]
+if not hist_summaries.empty:
+    hist_summaries["timestamp"] = pd.to_datetime(hist_summaries["timestamp"])
 
 if latest_summary["total"] == 0:
     st.warning(
@@ -752,6 +843,26 @@ def render_pdf_download(key: str, label: str, caption: str = ""):
         st.caption(f"📄  {pdf_error}")
 
 
+def render_pdf_bytes_download(pdf_bytes, key: str, label: str,
+                              filename_prefix: str, caption: str = ""):
+    """Render a download button for a scoped PDF report."""
+    if not pdf_bytes:
+        st.caption("Report could not be generated.")
+        return
+    st.download_button(
+        label=label,
+        data=pdf_bytes,
+        file_name=(
+            f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        ),
+        mime="application/pdf",
+        use_container_width=True,
+        key=key,
+    )
+    if caption:
+        st.caption(caption)
+
+
 # ============================================================
 # KPI STRIP
 # ============================================================
@@ -789,6 +900,18 @@ tab_overview, tab_tests, tab_history, tab_runner = st.tabs([
 
 # -------------------- OVERVIEW --------------------
 with tab_overview:
+    st.subheader("Latest Run Report")
+    lr1, lr2, lr3, lr4 = st.columns(4)
+    lr1.metric("Run Time", format_datetime(latest_summary["timestamp"]))
+    lr2.metric("Status", "Ready" if latest_summary["failed"] == 0 else "Review")
+    lr3.metric("Pass Rate", f"{latest_summary['pass_rate']:.1f}%")
+    lr4.metric("Duration", format_duration(latest_summary["duration"]))
+    st.caption(
+        "Latest run evidence is shown here. Individual journey evidence and "
+        "screenshots are available under All Tests."
+    )
+    st.divider()
+
     st.subheader("Test Outcomes - All Runs")
 
     c1, c2 = st.columns(2, gap="large")
@@ -876,17 +999,81 @@ with tab_overview:
 
     # ----- Release-readiness PDF -----
     st.divider()
+    st.subheader("Readiness Report Scope")
+    if not all_tests.empty:
+        min_date = all_tests["run_timestamp"].min().date()
+        max_date = all_tests["run_timestamp"].max().date()
+        rc1, rc2, rc3 = st.columns([2, 2, 3])
+        with rc1:
+            report_dates = st.date_input(
+                "Run date range",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date,
+                key="overview_report_dates",
+            )
+        with rc2:
+            report_status = st.multiselect(
+                "Statuses",
+                options=["passed", "failed", "skipped"],
+                default=["passed", "failed", "skipped"],
+                format_func=lambda x: x.title(),
+                key="overview_report_status",
+            )
+        with rc3:
+            report_tiers = st.multiselect(
+                "Tiers",
+                options=TIER_ORDER,
+                default=TIER_ORDER,
+                format_func=lambda x: TIER_LABELS[x],
+                key="overview_report_tiers",
+            )
+        if isinstance(report_dates, tuple):
+            start_date, end_date = report_dates
+        else:
+            start_date = end_date = report_dates
+        scoped_tests = all_tests[
+            (all_tests["run_timestamp"].dt.date >= start_date)
+            & (all_tests["run_timestamp"].dt.date <= end_date)
+            & all_tests["outcome"].isin(report_status)
+            & all_tests["tier"].isin(report_tiers)
+        ].copy()
+        scoped_summary = tests_summary(
+            scoped_tests,
+            timestamp=latest_summary["timestamp"],
+            source="filtered",
+        )
+        st.caption(
+            f"Selected report scope includes {len(scoped_tests)} test result(s) "
+            f"from {start_date} to {end_date}."
+        )
+    else:
+        scoped_tests = latest_tests
+        scoped_summary = latest_summary
+
+    try:
+        scoped_pdf = generate_pdf_report(
+            runs,
+            scoped_summary,
+            scoped_tests,
+            report_title="T24 Test Automation - Readiness Report",
+            scope_label="Selected Scope",
+        )
+    except Exception:
+        scoped_pdf = None
+
     dl1, dl2 = st.columns([1, 3])
     with dl1:
-        render_pdf_download(
+        render_pdf_bytes_download(
+            scoped_pdf,
             key="pdf_dl_overview",
-            label="📄  Download Release-Readiness Report (PDF)",
+            label="📄  Download Readiness Report (PDF)",
+            filename_prefix="BoK_T24_Readiness_Report",
         )
     with dl2:
         st.caption(
-            "Includes the latest-run KPIs, tier breakdown, per-test "
-            "results, and failure analysis. Suitable for inclusion in "
-            "release audit packs."
+            "Comprehensive report for the selected date, status, and tier "
+            "scope. Use All Tests for a single-test evidence report."
         )
 
 # -------------------- ALL TESTS --------------------
@@ -1070,17 +1257,35 @@ with tab_tests:
 
                 st.caption(f"**Test ID:** `{test['test_id']}`")
 
-                # PDF download (always reports the latest run)
+                # PDF download for the selected test only
+                selected_test_df = pd.DataFrame([test.to_dict()])
+                selected_summary = tests_summary(
+                    selected_test_df,
+                    timestamp=test["run_timestamp"],
+                    source=test["run_source"],
+                )
+                try:
+                    selected_pdf = generate_pdf_report(
+                        runs,
+                        selected_summary,
+                        selected_test_df,
+                        report_title=f"Test Evidence Report - {test['journey']}",
+                        scope_label="Selected Test",
+                    )
+                except Exception:
+                    selected_pdf = None
                 pdc1, pdc2 = st.columns([1, 2])
                 with pdc1:
-                    render_pdf_download(
+                    render_pdf_bytes_download(
+                        selected_pdf,
                         key="pdf_dl_detail",
-                        label="📄  Download Latest-Run Report (PDF)",
+                        label="📄  Download Selected-Test Report (PDF)",
+                        filename_prefix="BoK_T24_Selected_Test_Report",
                     )
                 with pdc2:
                     st.caption(
-                        "Full latest-run audit report - KPIs, results, "
-                        "and failure analysis."
+                        "Focused report for this selected test: status, timing, "
+                        "and failure detail where applicable."
                     )
 
                 # Failure forensics
@@ -1124,7 +1329,7 @@ with tab_tests:
                 if shots["auto"]:
                     st.markdown("##### 📸 Outcome Screenshot")
                     for s in shots["auto"]:
-                        st.image(s, caption=Path(s).stem.replace("_", " "),
+                        st.image(s, caption=screenshot_caption(s),
                                  use_container_width=True)
 
                 if shots["journey"] and is_from_latest:
@@ -1136,13 +1341,13 @@ with tab_tests:
                         "Step-by-step visual evidence captured during the test."
                     )
                     for s in shots["journey"]:
-                        st.image(s, caption=Path(s).stem.replace("_", " "),
+                        st.image(s, caption=screenshot_caption(s),
                                  use_container_width=True)
 
                 if shots["debug"] and is_from_latest:
                     st.markdown("##### 🔍 Debug Captures")
                     for s in shots["debug"]:
-                        st.image(s, caption=Path(s).stem.replace("_", " "),
+                        st.image(s, caption=screenshot_caption(s),
                                  use_container_width=True)
 
                 if not any(shots.values()):
@@ -1284,16 +1489,53 @@ with tab_history:
 
         # ----- Full audit PDF -----
         st.divider()
+        st.subheader("History Report Scope")
+        run_options = [
+            r["timestamp"].strftime("%d %b %Y, %H:%M:%S")
+            for _, r in hist_summaries.sort_values(
+                "timestamp", ascending=False).iterrows()
+        ]
+        selected_runs = st.multiselect(
+            "Runs to include",
+            options=run_options,
+            default=run_options[: min(5, len(run_options))],
+            key="history_report_runs",
+        )
+        selected_run_times = set(selected_runs)
+        history_tests = all_tests[
+            all_tests["run_timestamp"].apply(
+                lambda d: pd.Timestamp(d).strftime("%d %b %Y, %H:%M:%S")
+            ).isin(selected_run_times)
+        ].copy()
+        history_summary = tests_summary(
+            history_tests,
+            timestamp=history_tests["run_timestamp"].max()
+            if not history_tests.empty else datetime.now(),
+            source="history",
+        )
+        try:
+            history_pdf = generate_pdf_report(
+                runs,
+                history_summary,
+                history_tests,
+                report_title="T24 Test Automation - Run History Report",
+                scope_label="Selected Runs",
+            )
+        except Exception:
+            history_pdf = None
+
         adl1, adl2 = st.columns([1, 3])
         with adl1:
-            render_pdf_download(
+            render_pdf_bytes_download(
+                history_pdf,
                 key="pdf_dl_history",
-                label="📄  Download Full Audit Report (PDF)",
+                label="📄  Download History Report (PDF)",
+                filename_prefix="BoK_T24_History_Report",
             )
         with adl2:
             st.caption(
-                "Latest-run audit report with KPIs, tier breakdown, "
-                "per-test results, and failure forensics."
+                "Report for the selected historical runs, including KPIs, "
+                "tier breakdown, per-test results, and failure forensics."
             )
 
 # -------------------- TEST RUNNER --------------------
@@ -1319,17 +1561,18 @@ with tab_runner:
             "Regression Suite",
         )
     if qr3.button(
-        "🔵  E2E Lifecycle (Customer → Account)",
+        "🔵  Full E2E Lifecycle",
         use_container_width=True, type="primary",
     ):
-        # Marker filter + ordering done by conftest priority hook
-        triggered = (["tests/regression/", "-m", "e2e"], "E2E Lifecycle")
+        # Marker filter + ordering done by conftest priority hook.
+        # Runs all E2E journeys, including Customer, Account, FT, and AA.
+        triggered = (["tests/regression/", "-m", "e2e"], "Full E2E Lifecycle")
     if qr4.button("🟣  Everything", use_container_width=True):
         triggered = (["tests/"], "Full Suite")
 
     # ----- Individual journeys -----
     st.markdown("##### Individual Journeys")
-    jr1, jr2, jr3 = st.columns(3)
+    jr1, jr2, jr3, jr4 = st.columns(4)
 
     if jr1.button("👤  Customer (I/A)", use_container_width=True):
         triggered = (
@@ -1346,6 +1589,11 @@ with tab_runner:
         triggered = (
             ["tests/regression/", "-k", "funds_transfer"],
             "Funds Transfer",
+        )
+    if jr4.button("🏦  AA Term Deposit", use_container_width=True):
+        triggered = (
+            ["tests/regression/test_07_aa_deposit_e2e.py"],
+            "AA Term Deposit Lifecycle",
         )
 
     # ----- Compliance / negative -----

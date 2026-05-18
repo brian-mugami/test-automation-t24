@@ -27,6 +27,10 @@ class HomePage(BasePage):
     def open_aa_product_catalog(self) -> "HomePage":
         return self.execute_command("COS AA.PRODUCT.CATALOG.RETAIL")
 
+    def open_aa_activity_auth_queue(self) -> "HomePage":
+        """Open the Unauthorized AAA records enquiry."""
+        return self.execute_command("COS AA.ARRANGEMENT.ACTIVITY-NAU")
+
     def open_account_transfer(self) -> "HomePage":
         """Open the Account Transfer chooser via 'COS ACCOUNT.TRANSFER'."""
         return self.execute_command("COS ACCOUNT.TRANSFER")

@@ -23,7 +23,7 @@ class AATermDepositPage(BasePage):
     PAYOUT_ACCOUNT = (By.ID, "fieldName:PAYOUT.ACCOUNT:1:1")
     ARRANGEMENT_ID     = (By.ID, "disabled_ARRANGEMENT")
     ARRANGEMENT_HIDDEN = (By.ID, "fieldName:ARRANGEMENT")
-    ARR_ID_PATTERN = re.compile(r"AA\d{5}[A-Z0-9]{3,9}")
+    ARR_ID_PATTERN = re.compile(r"\bAA[A-Z0-9]{8,20}\b")
 
     # ---- toolbar (toolbar frame) ----
     VALIDATE_BTN = (By.CSS_SELECTOR, "a[accesskey='V'][title='Validate a deal']")
@@ -242,7 +242,55 @@ class AATermDepositPage(BasePage):
         time.sleep(3)
         return self
 
+    def read_form_arrangement_id(self, timeout=20):
+        """Read the arrangement reference from the input form header.
+
+        This is the AA arrangement number used by AA.ARRANGEMENT.ACTIVITY-NAU
+        column 3, not the post-commit AA activity transaction reference.
+        """
+        end = time.time() + timeout
+        while time.time() < end:
+            self.driver.switch_to.default_content()
+            if self._search_frames(self.ARRANGEMENT_ID, depth=0):
+                try:
+                    for el in self.driver.find_elements(*self.ARRANGEMENT_ID):
+                        text = (el.get_attribute("textContent") or "").strip()
+                        if text and text.upper() != "NEW":
+                            logger.info(
+                                f"Arrangement ID from form header: {text}")
+                            return text
+                except Exception:
+                    pass
+
+            self.driver.switch_to.default_content()
+            if self._search_frames(self.ARRANGEMENT_HIDDEN, depth=0):
+                try:
+                    for el in self.driver.find_elements(*self.ARRANGEMENT_HIDDEN):
+                        value = (el.get_attribute("value") or "").strip()
+                        if value and value.upper() != "NEW":
+                            logger.info(
+                                f"Arrangement ID from form hidden field: {value}")
+                            return value
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+        self.screenshot("DEBUG_aa_form_arrangement_missing")
+        return None
+
     def _find_arrangement_in_frames(self, depth=0):
+        try:
+            for el in self.driver.find_elements(By.CSS_SELECTOR, "td.message, .message, #message"):
+                txt = (el.get_attribute("textContent") or "").strip()
+                if txt.startswith("Txn Complete:"):
+                    parts = txt.split()
+                    if len(parts) >= 3:
+                        tx_id = parts[2].strip()
+                        if self.ARR_ID_PATTERN.fullmatch(tx_id):
+                            logger.info(f"Arrangement ID from Txn Complete message: {tx_id}")
+                            return tx_id
+        except Exception:
+            pass
         try:
             for el in self.driver.find_elements(*self.ARRANGEMENT_ID):
                 t = (el.get_attribute("textContent") or "").strip()
